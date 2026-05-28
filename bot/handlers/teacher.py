@@ -37,7 +37,6 @@ from bot.keyboards.teacher_kb import (
     close_outcome_kb,
     back_to_menu_kb,
     back_to_kb_kb,
-    after_schedule_kb,
     CLARIFICATION_FIELDS,
 )
 from teachers_config import TEACHERS
@@ -58,6 +57,7 @@ STATUS_LABELS = {
     "in_progress": "В работе",
     "awaiting_clarification": "Ожидает уточнения",
     "scheduled": "Консультация назначена",
+    "pending_confirmation": "Ожидает подтверждения",
     "closed": "Закрыт",
 }
 
@@ -99,7 +99,8 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
                 in_progress = await ticket_service.get_teacher_tickets(session, teacher_id, "in_progress")
                 awaiting = await ticket_service.get_teacher_tickets(session, teacher_id, "awaiting_clarification")
                 scheduled = await ticket_service.get_teacher_tickets(session, teacher_id, "scheduled")
-                active_count = len(in_progress) + len(awaiting) + len(scheduled)
+                pending = await ticket_service.get_teacher_tickets(session, teacher_id, "pending_confirmation")
+                active_count = len(in_progress) + len(awaiting) + len(scheduled) + len(pending)
                 closed_count = len(await ticket_service.get_teacher_tickets(session, teacher_id, "closed"))
         await _edit(event, f"Привет, {user.name}!", attachments=[main_menu_kb(new_count, active_count, closed_count)])
 
@@ -133,7 +134,8 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
             in_progress = await ticket_service.get_teacher_tickets(session, teacher_id, "in_progress")
             awaiting = await ticket_service.get_teacher_tickets(session, teacher_id, "awaiting_clarification")
             scheduled = await ticket_service.get_teacher_tickets(session, teacher_id, "scheduled")
-            tickets = in_progress + awaiting + scheduled
+            pending = await ticket_service.get_teacher_tickets(session, teacher_id, "pending_confirmation")
+            tickets = in_progress + awaiting + scheduled + pending
             student_names = {}
             for t in tickets:
                 s = await session.get(User, t.student_id)
@@ -401,7 +403,7 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
         fsm_data = await context.get_data()
         suggestion = fsm_data.get("ai_suggestion", "")
         async with async_session() as session:
-            await ticket_service.update_ticket_status(session, ticket_id, "closed")
+            await ticket_service.update_ticket_status(session, ticket_id, "pending_confirmation")
             await ticket_service.add_log(session, ticket_id, "closed", user_id, suggestion)
             ticket = await ticket_service.get_ticket_by_id(session, ticket_id)
             student = await session.get(User, ticket.student_id) if ticket else None
@@ -409,9 +411,9 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
             ticket_number = ticket.number if ticket else "?"
             await session.commit()
         await context.clear()
-        await _edit(event, "✅ Ответ отправлен студенту, тикет закрыт.", attachments=[back_to_menu_kb()])
+        await _edit(event, "✅ Ответ отправлен, ожидаем подтверждения студента.", attachments=[back_to_menu_kb()])
         if student_chat and student_chat != chat_id:
-            await notification_service.notify_student_closed(bot, student_chat, ticket_number, suggestion, ticket_id)
+            await notification_service.notify_student_pending_confirm(bot, student_chat, ticket_number, suggestion, ticket_id)
 
     elif data.startswith("teacher:answer:"):
         ticket_id = int(data.split(":")[-1])
@@ -435,35 +437,68 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
             "rejected": "Отказано с причиной", "scheduled": "Консультация назначена",
         }
         outcome_label = outcome_labels.get(outcome, outcome)
+        full_comment = f"{outcome_label}: {answer_text}" if answer_text else outcome_label
+
         async with async_session() as session:
-            await ticket_service.update_ticket_status(session, ticket_id, "closed")
-            await ticket_service.add_log(session, ticket_id, "closed", user_id, f"{outcome_label}: {answer_text}")
             ticket = await ticket_service.get_ticket_by_id(session, ticket_id)
             student = await session.get(User, ticket.student_id) if ticket else None
             student_chat = student.chat_id if student else None
             ticket_number = ticket.number if ticket else "?"
-            await session.commit()
-        await context.clear()
-        await _edit(event, "✅ Тикет закрыт.", attachments=[back_to_menu_kb()])
-        if student_chat and student_chat != chat_id:
-            await notification_service.notify_student_closed(bot, student_chat, ticket_number, answer_text, ticket_id)
 
-    elif data.startswith("teacher:schedule:"):
-        ticket_id = int(data.split(":")[-1])
-        await context.set_state(TeacherStates.offering_slots)
-        await context.update_data(schedule_ticket_id=ticket_id)
-        await _edit(event,
-            "Введите 2-3 варианта времени консультации (каждый с новой строки).\n"
-            "Например:\nПн 26 мая 14:00\nВт 27 мая 10:00"
-        )
+            if outcome == "rejected":
+                await ticket_service.update_ticket_status(session, ticket_id, "closed")
+                await ticket_service.add_log(session, ticket_id, "closed", user_id, full_comment)
+                await session.commit()
+                await context.clear()
+                await _edit(event, "✅ Тикет закрыт (отказано).", attachments=[back_to_menu_kb()])
+                if student_chat and student_chat != chat_id:
+                    await notification_service.notify_student_rejected(bot, student_chat, ticket_number, answer_text)
+                # cooldown: студент не может писать этому преподу 24ч
+                if ticket:
+                    await _set_cooldown(ticket.student_id, teacher_id)
+            else:
+                await ticket_service.update_ticket_status(session, ticket_id, "pending_confirmation")
+                await ticket_service.add_log(session, ticket_id, "closed", user_id, full_comment)
+                await session.commit()
+                await context.clear()
+                await _edit(event, "✅ Ответ отправлен, ожидаем подтверждения студента.", attachments=[back_to_menu_kb()])
+                if student_chat and student_chat != chat_id:
+                    await notification_service.notify_student_pending_confirm(bot, student_chat, ticket_number, answer_text, ticket_id)
 
-    elif data.startswith("teacher:close_after_consult:"):
-        ticket_id = int(data.split(":")[-1])
+    elif data == "teacher:digest":
+        if not teacher_id:
+            await _edit(event, "Вы не найдены в справочнике.", attachments=[back_to_menu_kb()])
+            return
+        from datetime import datetime, timezone, timedelta
+        now_utc = datetime.now(timezone.utc)
+        since_24h = now_utc - timedelta(hours=24)
         async with async_session() as session:
-            await ticket_service.update_ticket_status(session, ticket_id, "closed")
-            await ticket_service.add_log(session, ticket_id, "closed", user_id, "Консультация проведена")
-            await session.commit()
-        await _edit(event, "✅ Тикет закрыт после консультации.", attachments=[back_to_menu_kb()])
+            all_tickets = await ticket_service.get_teacher_tickets(session, teacher_id)
+
+        new_24h = [t for t in all_tickets if t.status == "new" and t.created_at and
+                   t.created_at.replace(tzinfo=timezone.utc) >= since_24h]
+        waiting_24h = [t for t in all_tickets if t.status in ("new", "in_progress") and t.created_at and
+                       t.created_at.replace(tzinfo=timezone.utc) < since_24h]
+        pending = [t for t in all_tickets if t.status == "pending_confirmation"]
+        active = [t for t in all_tickets if t.status in ("in_progress", "awaiting_clarification", "scheduled")]
+
+        cat_counts: dict[str, int] = {}
+        for t in all_tickets:
+            label = CATEGORY_LABELS.get(t.category, t.category)
+            cat_counts[label] = cat_counts.get(label, 0) + 1
+        top_cats = sorted(cat_counts.items(), key=lambda x: -x[1])[:3]
+        cats_str = "\n".join(f"  • {k}: {v}" for k, v in top_cats) or "  нет данных"
+
+        text = (
+            f"Дайджест на {now_utc.astimezone(timezone(timedelta(hours=3))).strftime('%d.%m %H:%M')}\n\n"
+            f"Новых за 24 ч: {len(new_24h)}\n"
+            f"Ждут ответа >24 ч: {len(waiting_24h)}\n"
+            f"В работе: {len(active)}\n"
+            f"Ожидают подтверждения студентом: {len(pending)}\n\n"
+            f"Топ категорий:\n{cats_str}"
+        )
+        await _edit(event, text, attachments=[back_to_menu_kb()])
+
 
 
 @router.message_created(TeacherStates.entering_kb_title)
@@ -486,7 +521,6 @@ async def teacher_kb_title_input(event: MessageCreated, context: BaseContext):
     TeacherStates.entering_answer,
     TeacherStates.entering_close_comment,
     TeacherStates.requesting_clarification,
-    TeacherStates.offering_slots,
 )
 async def teacher_text_input(event: MessageCreated, context: BaseContext):
     current_state = await context.get_state()
@@ -560,7 +594,7 @@ async def teacher_text_input(event: MessageCreated, context: BaseContext):
         close_prompt_mid = fsm_data.get("close_prompt_mid")
         comment = None if text.strip() == "-" else text
         async with async_session() as session:
-            await ticket_service.update_ticket_status(session, ticket_id, "closed")
+            await ticket_service.update_ticket_status(session, ticket_id, "pending_confirmation")
             await ticket_service.add_log(session, ticket_id, "closed", user_id, comment)
             ticket = await ticket_service.get_ticket_by_id(session, ticket_id)
             student = await session.get(User, ticket.student_id) if ticket else None
@@ -569,11 +603,11 @@ async def teacher_text_input(event: MessageCreated, context: BaseContext):
             await session.commit()
         await context.clear()
         if close_prompt_mid:
-            await bot.edit_message(message_id=close_prompt_mid, text="✅ Тикет закрыт.", attachments=[back_to_menu_kb()])
+            await bot.edit_message(message_id=close_prompt_mid, text="✅ Ответ отправлен, ожидаем подтверждения студента.", attachments=[back_to_menu_kb()])
         else:
-            await bot.send_message(chat_id=chat_id, text="✅ Тикет закрыт.", attachments=[back_to_menu_kb()])
+            await bot.send_message(chat_id=chat_id, text="✅ Ответ отправлен, ожидаем подтверждения студента.", attachments=[back_to_menu_kb()])
         if student_chat and student_chat != chat_id:
-            await notification_service.notify_student_closed(bot, student_chat, ticket_number, comment or "", ticket_id)
+            await notification_service.notify_student_pending_confirm(bot, student_chat, ticket_number, comment or "", ticket_id)
 
     elif current_state == str(TeacherStates.requesting_clarification):
         fsm_data = await context.get_data()
@@ -587,24 +621,35 @@ async def teacher_text_input(event: MessageCreated, context: BaseContext):
                 attachments=[clarification_fields_kb(ticket_id, selected)],
             )
 
-    elif current_state == str(TeacherStates.offering_slots):
-        fsm_data = await context.get_data()
-        ticket_id = fsm_data.get("schedule_ticket_id")
-        slots = [s.strip() for s in text.split("\n") if s.strip()]
-        async with async_session() as session:
-            ticket = await ticket_service.get_ticket_by_id(session, ticket_id)
-            student = await session.get(User, ticket.student_id) if ticket else None
-            student_chat = student.chat_id if student else None
-            ticket_number = ticket.number if ticket else "?"
-        await context.update_data(**{f"slots_{ticket_id}": slots})
-        await context.set_state(None)
-        await bot.send_message(
-            chat_id=chat_id,
-            text="✅ Варианты времени отправлены студенту.",
-            attachments=[after_schedule_kb(ticket_id)],
-        )
-        if student_chat:
-            await notification_service.notify_student_slots(bot, student_chat, ticket_number, slots, ticket_id)
+
+
+async def _set_cooldown(student_id: int, teacher_cfg_id: int, hours: int = 24) -> None:
+    from datetime import datetime, timedelta
+    from core.models.bot_state import BotState
+    expiry = (datetime.utcnow() + timedelta(hours=hours)).isoformat()
+    key = f"block_{student_id}_{teacher_cfg_id}"
+    async with async_session() as session:
+        result = await session.execute(select(BotState).where(BotState.key == key))
+        state = result.scalar_one_or_none()
+        if state:
+            state.value = expiry
+        else:
+            session.add(BotState(key=key, value=expiry))
+        await session.commit()
+
+
+async def get_cooldown_expiry(student_id: int, teacher_cfg_id: int):
+    from datetime import datetime
+    from core.models.bot_state import BotState
+    key = f"block_{student_id}_{teacher_cfg_id}"
+    async with async_session() as session:
+        result = await session.execute(select(BotState).where(BotState.key == key))
+        state = result.scalar_one_or_none()
+    if state and state.value:
+        expiry = datetime.fromisoformat(state.value)
+        if datetime.utcnow() < expiry:
+            return expiry
+    return None
 
 
 async def _show_ticket_detail_teacher(event: MessageCallback, ticket_id: int):
@@ -638,7 +683,6 @@ async def _show_ticket_detail_teacher(event: MessageCallback, ticket_id: int):
     await _edit(event,
         f"{ticket.number} · [{status_label}]\n\n"
         f"Студент: {student_name}\n"
-        f"Группа: {student_group}\n"
         f"Категория: {category_label}\n"
         f"Текст: {ticket.text}\n\n"
         f"История:\n{history_str}",

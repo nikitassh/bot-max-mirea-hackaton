@@ -1,5 +1,7 @@
-from maxapi.types import ButtonsPayload, CallbackButton
+from maxapi.types import ButtonsPayload, CallbackButton, LinkButton
 from maxapi.types.attachments.attachment import Attachment
+
+WEBAPP_URL = "https://precious-granita-65161f.netlify.app"
 
 from teachers_config import TEACHERS
 from curriculum_config import CURRICULUM
@@ -21,6 +23,7 @@ def main_menu_kb() -> Attachment:
         [CallbackButton(text="✏️ Создать обращение", payload="student:create")],
         [CallbackButton(text="📋 Мои обращения", payload="student:my_tickets")],
         [CallbackButton(text="❓ Помощь", payload="common:help")],
+        [LinkButton(text="🌐 WebApp Demo", url=WEBAPP_URL)],
     ]).pack()
 
 
@@ -162,8 +165,26 @@ def after_create_kb(ticket_id: int) -> Attachment:
     ]).pack()
 
 
-def my_tickets_kb(items: list[tuple[int, str]]) -> Attachment:
-    rows = [[CallbackButton(text=label, payload=f"student:view_ticket:{tid}")] for tid, label in items]
+TICKETS_PAGE_SIZE = 7
+
+
+def my_tickets_kb(items: list[tuple[int, str]], page: int = 0) -> Attachment:
+    total = len(items)
+    total_pages = max(1, (total + TICKETS_PAGE_SIZE - 1) // TICKETS_PAGE_SIZE)
+    start = page * TICKETS_PAGE_SIZE
+    chunk = items[start:start + TICKETS_PAGE_SIZE]
+
+    rows = [[CallbackButton(text=label, payload=f"student:view_ticket:{tid}")] for tid, label in chunk]
+
+    if total_pages > 1:
+        prev_payload = f"student:my_tickets_page:{page - 1}" if page > 0 else "student:noop"
+        next_payload = f"student:my_tickets_page:{page + 1}" if page < total_pages - 1 else "student:noop"
+        rows.append([
+            CallbackButton(text="◀", payload=prev_payload),
+            CallbackButton(text=f"{page + 1}/{total_pages}", payload="student:noop"),
+            CallbackButton(text="▶", payload=next_payload),
+        ])
+
     rows.append([CallbackButton(text="« В главное меню", payload="student:main_menu")])
     return ButtonsPayload(buttons=rows).pack()
 
@@ -171,6 +192,13 @@ def my_tickets_kb(items: list[tuple[int, str]]) -> Attachment:
 def reply_clarification_kb(ticket_id: int) -> Attachment:
     return ButtonsPayload(buttons=[
         [CallbackButton(text="Ответить", payload=f"student:reply_clarification:{ticket_id}")],
+    ]).pack()
+
+
+def confirm_close_kb(ticket_id: int) -> Attachment:
+    return ButtonsPayload(buttons=[
+        [CallbackButton(text="✅ Подтвердить решение", payload=f"student:confirm_resolved:{ticket_id}")],
+        [CallbackButton(text="❌ Не решено", payload=f"student:not_resolved:{ticket_id}")],
     ]).pack()
 
 

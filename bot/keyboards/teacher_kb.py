@@ -1,5 +1,7 @@
-from maxapi.types import ButtonsPayload, CallbackButton
+from maxapi.types import ButtonsPayload, CallbackButton, LinkButton
 from maxapi.types.attachments.attachment import Attachment
+
+WEBAPP_URL = "https://precious-granita-65161f.netlify.app"
 
 
 def main_menu_kb(new_count: int = 0, active_count: int = 0, closed_count: int = 0) -> Attachment:
@@ -9,6 +11,8 @@ def main_menu_kb(new_count: int = 0, active_count: int = 0, closed_count: int = 
         [CallbackButton(text=f"✅ Закрытые тикеты ({closed_count})", payload="teacher:closed")],
         [CallbackButton(text="📚 База знаний", payload="teacher:upload_kb")],
         [CallbackButton(text="📊 Статистика", payload="teacher:stats")],
+        [CallbackButton(text="📰 Дайджест", payload="teacher:digest")],
+        [LinkButton(text="🌐 WebApp Demo", url=WEBAPP_URL)],
     ]).pack()
 
 
@@ -77,7 +81,6 @@ def working_ticket_kb(ticket_id: int) -> Attachment:
         [CallbackButton(text="💡 Ответ ИИ из базы знаний", payload=f"teacher:ai_suggest:{ticket_id}")],
         [CallbackButton(text="❓ Запросить уточнение", payload=f"teacher:request_clarification:{ticket_id}")],
         [CallbackButton(text="💬 Ответить и закрыть", payload=f"teacher:answer:{ticket_id}")],
-        [CallbackButton(text="📅 Назначить консультацию", payload=f"teacher:schedule:{ticket_id}")],
         [CallbackButton(text="🔒 Закрыть", payload=f"teacher:close:{ticket_id}")],
         [CallbackButton(text="« Назад", payload="teacher:main_menu")],
     ]).pack()

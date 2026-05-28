@@ -36,10 +36,31 @@ async def notify_teacher_clarification_reply(bot, teacher_chat_id: int, ticket_n
     await safe_send(bot, teacher_chat_id, text, attachments=[view_ticket_kb(ticket_id)])
 
 
+async def notify_student_pending_confirm(bot, student_chat_id: int, ticket_number: str, answer: str, ticket_id: int):
+    from bot.keyboards.student_kb import confirm_close_kb
+    text = (
+        f"Преподаватель ответил на обращение {ticket_number}:\n\n"
+        f"{answer}\n\n"
+        f"Вопрос решён?"
+    )
+    await safe_send(bot, student_chat_id, text, attachments=[confirm_close_kb(ticket_id)])
+
+
+async def notify_student_rejected(bot, student_chat_id: int, ticket_number: str, reason: str):
+    text = f"Обращение {ticket_number} отклонено.\nПричина: {reason}"
+    await safe_send(bot, student_chat_id, text)
+
+
 async def notify_student_closed(bot, student_chat_id: int, ticket_number: str, answer: str, ticket_id: int):
     from bot.keyboards.student_kb import rating_kb
     text = f"✅ Обращение {ticket_number} закрыто.\nОтвет: {answer}"
     await safe_send(bot, student_chat_id, text, attachments=[rating_kb(ticket_id)])
+
+
+async def notify_teacher_reopened(bot, teacher_chat_id: int, ticket_number: str, comment: str, ticket_id: int):
+    from bot.keyboards.teacher_kb import view_ticket_kb
+    text = f"Студент оспорил закрытие обращения {ticket_number}:\n{comment}"
+    await safe_send(bot, teacher_chat_id, text, attachments=[view_ticket_kb(ticket_id)])
 
 
 async def notify_student_slots(bot, student_chat_id: int, ticket_number: str, slots: list[str], ticket_id: int):

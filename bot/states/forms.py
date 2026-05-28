@@ -21,6 +21,5 @@ class TeacherStates(StatesGroup):
     entering_answer = State()
     requesting_clarification = State()
     entering_close_comment = State()
-    offering_slots = State()
     uploading_kb = State()
     entering_kb_title = State()
