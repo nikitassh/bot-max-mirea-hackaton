@@ -22,11 +22,28 @@ def main_menu_kb() -> Attachment:
     ]).pack()
 
 
-def teachers_kb() -> Attachment:
+PAGE_SIZE = 7
+
+
+def teachers_kb(page: int = 0) -> Attachment:
+    total = len(TEACHERS)
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+    start = page * PAGE_SIZE
+    chunk = TEACHERS[start:start + PAGE_SIZE]
+
     rows = [
         [CallbackButton(text=t["name"], payload=f"student:teacher:{t['id']}")]
-        for t in TEACHERS
+        for t in chunk
     ]
+
+    prev_payload = f"student:teachers_page:{page - 1}" if page > 0 else "student:noop"
+    next_payload = f"student:teachers_page:{page + 1}" if page < total_pages - 1 else "student:noop"
+    rows.append([
+        CallbackButton(text="◀", payload=prev_payload),
+        CallbackButton(text=f"{page + 1}/{total_pages}", payload="student:noop"),
+        CallbackButton(text="▶", payload=next_payload),
+    ])
+
     rows.append([CallbackButton(text="« Назад", payload="student:main_menu")])
     return ButtonsPayload(buttons=rows).pack()
 

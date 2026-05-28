@@ -194,12 +194,18 @@ async def _redirect_to_menu(bot, user_id: int, chat_id: int, role: str | None = 
         from core.services.ticket_service import get_teacher_tickets
         if teacher_cfg_id is None:
             teacher_cfg_id = next((t["id"] for t in TEACHERS if t["name"] == name), TEACHERS[0]["id"])
+        teacher_info = next((t for t in TEACHERS if t["id"] == teacher_cfg_id), TEACHERS[0])
         count = 0
         async with async_session() as session:
             new_tickets = await get_teacher_tickets(session, teacher_cfg_id, "new")
             count = len(new_tickets)
         await bot.send_message(
             chat_id=chat_id,
-            text=f"Привет, {name}!",
+            text=(
+                f"Вы вошли как преподаватель:\n\n"
+                f"👤 {teacher_info['name']}\n"
+                f"📚 Предмет: {teacher_info['subject']}\n\n"
+                f"Новых обращений: {count}"
+            ),
             attachments=[main_menu_kb(count)],
         )

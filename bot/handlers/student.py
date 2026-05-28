@@ -86,7 +86,14 @@ async def student_callbacks(event: MessageCallback, context: BaseContext):
 
     elif data == "student:create":
         await context.set_state(StudentStates.choosing_teacher)
-        await _edit(event, "Выберите преподавателя:", attachments=[teachers_kb()])
+        await _edit(event, "Выберите преподавателя:", attachments=[teachers_kb(0)])
+
+    elif data.startswith("student:teachers_page:"):
+        page = int(data.split(":")[-1])
+        await _edit(event, "Выберите преподавателя:", attachments=[teachers_kb(page)])
+
+    elif data == "student:noop":
+        pass
 
     elif data.startswith("student:teacher:"):
         teacher_id = int(data.split(":")[-1])

@@ -19,6 +19,8 @@ services:
     build: .
     command: python -m bot.main
     env_file: .env
+    volumes:
+      - .:/app
     depends_on:
       db:
         condition: service_healthy
@@ -28,6 +30,8 @@ services:
     build: .
     command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
     env_file: .env
+    volumes:
+      - .:/app
     ports:
       - "8000:8000"
     depends_on:
