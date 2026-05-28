@@ -9,3 +9,4 @@ openai
 pymupdf
 loguru
 python-dotenv
+matplotlib

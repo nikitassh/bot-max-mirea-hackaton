@@ -12,6 +12,7 @@ class StudentStates(StatesGroup):
     entering_text = State()
     confirming = State()
     answering_clarification = State()
+    searching_teacher = State()
 
 
 class TeacherStates(StatesGroup):
@@ -22,3 +23,4 @@ class TeacherStates(StatesGroup):
     entering_close_comment = State()
     offering_slots = State()
     uploading_kb = State()
+    entering_kb_title = State()

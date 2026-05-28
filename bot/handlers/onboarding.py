@@ -6,8 +6,6 @@ from maxapi.types import ButtonsPayload, CallbackButton, LinkButton
 from maxapi.types.attachments.attachment import Attachment
 from maxapi.context import BaseContext
 from maxapi.types import CommandStart
-from sqlalchemy import select
-
 from core.db import async_session
 from core.models.user import User
 from bot.states.forms import OnboardingStates
@@ -50,13 +48,25 @@ async def _edit(event: MessageCallback, text: str, attachments=None):
     await event.bot.edit_message(**kwargs)
 
 
-async def _user_exists(user_id: int) -> bool:
-    async with async_session() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
-        return result.scalar_one_or_none() is not None
+async def _clear_chat(bot, chat_id: int):
+    while True:
+        result = await bot.get_messages(chat_id=chat_id, count=100)
+        if not result.messages:
+            break
+        deleted = 0
+        for msg in result.messages:
+            try:
+                await bot.delete_message(message_id=msg.body.mid)
+                deleted += 1
+            except Exception:
+                pass
+        if deleted == 0 or len(result.messages) < 100:
+            break
 
 
 async def _show_disclaimer(bot, chat_id: int, context: BaseContext):
+    await context.clear()
+    await _clear_chat(bot, chat_id)
     await context.set_state(OnboardingStates.waiting_consent)
     await bot.send_message(
         chat_id=chat_id,
@@ -75,11 +85,6 @@ async def handle_bot_started(event: BotStarted, context: BaseContext):
     bot = event.bot
     chat_id = event.chat_id
     user_id = event.user.user_id
-
-    if await _user_exists(user_id):
-        await _redirect_to_menu(bot, user_id, chat_id)
-        return
-
     await context.update_data(user_id=user_id, chat_id=chat_id, name=_make_name(event.user))
     await _show_disclaimer(bot, chat_id, context)
 
@@ -89,11 +94,7 @@ async def handle_start_command(event: MessageCreated, context: BaseContext):
     bot = event.bot
     chat_id = event.chat.chat_id
     user_id = event.from_user.user_id
-
-    if await _user_exists(user_id):
-        await _redirect_to_menu(bot, user_id, chat_id)
-        return
-
+    await context.clear()
     await context.update_data(user_id=user_id, chat_id=chat_id, name=_make_name(event.from_user))
     await _show_disclaimer(bot, chat_id, context)
 
@@ -132,9 +133,14 @@ async def handle_onboarding_callbacks(event: MessageCallback, context: BaseConte
 
     elif data.startswith("onboarding:role:"):
         role = data.split(":")[-1]
+        mid = event.message.body.mid
         fsm_data = await context.get_data()
         uid = fsm_data.get("user_id", user_id)
         cid = fsm_data.get("chat_id", chat_id)
+        try:
+            await event.bot.delete_message(message_id=mid)
+        except Exception:
+            pass
 
         if role == "teacher":
             from teachers_config import TEACHERS
@@ -203,8 +209,7 @@ async def _redirect_to_menu(bot, user_id: int, chat_id: int, role: str | None = 
             chat_id=chat_id,
             text=(
                 f"Вы вошли как преподаватель:\n\n"
-                f"👤 {teacher_info['name']}\n"
-                f"📚 Предмет: {teacher_info['subject']}\n\n"
+                f"👤 {teacher_info['name']}\n\n"
                 f"Новых обращений: {count}"
             ),
             attachments=[main_menu_kb(count)],

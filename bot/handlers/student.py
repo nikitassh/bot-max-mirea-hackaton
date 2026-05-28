@@ -19,14 +19,19 @@ from core.models.user import User
 from core.models.ticket import Ticket
 from core.models.clarification import Clarification
 from core.models.rating import Rating
-from core.models.knowledge_base import KnowledgeBase
 from core.services import ticket_service, ai_service, notification_service
 from bot.states.forms import StudentStates
 from bot.keyboards.student_kb import (
     main_menu_kb,
+    create_method_kb,
+    semesters_kb,
+    disciplines_kb,
+    discipline_teachers_kb,
+    teacher_search_prompt_kb,
+    teacher_search_results_kb,
     teachers_kb,
     categories_kb,
-    ai_answer_kb,
+    entering_text_kb,
     duplicate_found_kb,
     confirm_ticket_kb,
     after_create_kb,
@@ -35,6 +40,7 @@ from bot.keyboards.student_kb import (
     reply_clarification_kb,
 )
 from teachers_config import TEACHERS
+from curriculum_config import CURRICULUM
 
 router = Router()
 
@@ -85,8 +91,38 @@ async def student_callbacks(event: MessageCallback, context: BaseContext):
         await _edit(event, f"Привет, {name}! Чем могу помочь?", attachments=[main_menu_kb()])
 
     elif data == "student:create":
+        await _edit(event, "Как хотите найти преподавателя?", attachments=[create_method_kb()])
+
+    elif data == "student:method:semester":
+        await _edit(event, "Выберите семестр:", attachments=[semesters_kb()])
+
+    elif data.startswith("student:semester:"):
+        sem = int(data.split(":")[-1])
+        await context.update_data(semester=sem)
+        await _edit(event, f"Семестр {sem} — выберите дисциплину:", attachments=[disciplines_kb(sem)])
+
+    elif data.startswith("student:discipline:"):
+        parts = data.split(":")
+        sem = int(parts[2])
+        idx = int(parts[3])
+        discipline = CURRICULUM.get(sem, [])[idx]
+        await context.update_data(discipline=discipline["name"])
         await context.set_state(StudentStates.choosing_teacher)
-        await _edit(event, "Выберите преподавателя:", attachments=[teachers_kb(0)])
+        await _edit(event,
+            f"Дисциплина: {discipline['name']}\nВыберите преподавателя:",
+            attachments=[discipline_teachers_kb(discipline["teacher_ids"], sem)],
+        )
+
+    elif data == "student:method:search":
+        await context.set_state(StudentStates.searching_teacher)
+        await context.update_data(search_results=[])
+        await _edit(event, "Введите имя преподавателя:", attachments=[teacher_search_prompt_kb()])
+
+    elif data.startswith("student:search_page:"):
+        page = int(data.split(":")[-1])
+        fsm_data = await context.get_data()
+        results = fsm_data.get("search_results", [])
+        await _edit(event, "Выберите преподавателя из результатов:", attachments=[teacher_search_results_kb(results, page)])
 
     elif data.startswith("student:teachers_page:"):
         page = int(data.split(":")[-1])
@@ -108,8 +144,13 @@ async def student_callbacks(event: MessageCallback, context: BaseContext):
         await _edit(event,
             "Опишите ваш вопрос кратко.\n\n"
             "⚠️ Не указывайте персональные данные, не нужные для решения вопроса.\n"
-            "Можно приложить ссылку на репозиторий."
+            "Можно приложить ссылку на репозиторий.",
+            attachments=[entering_text_kb()],
         )
+
+    elif data == "student:back_to_categories":
+        await context.set_state(StudentStates.choosing_category)
+        await _edit(event, "Выберите категорию обращения:", attachments=[categories_kb()])
 
     elif data == "student:ai_satisfied":
         await context.clear()
@@ -182,6 +223,30 @@ async def student_callbacks(event: MessageCallback, context: BaseContext):
             await notification_service.notify_teacher_slot_chosen(bot, teacher_chat, student.name, slot)
 
 
+@router.message_created(StudentStates.searching_teacher)
+async def student_teacher_search(event: MessageCreated, context: BaseContext):
+    chat_id = event.chat.chat_id
+    query = (event.message.body.text or "").strip().lower()
+
+    matches = [t for t in TEACHERS if query in t["name"].lower()]
+
+    if not matches:
+        await event.bot.send_message(
+            chat_id=chat_id,
+            text=f"Преподаватель «{query}» не найден. Попробуйте ещё раз:",
+            attachments=[teacher_search_prompt_kb()],
+        )
+        return
+
+    await context.update_data(search_results=matches)
+    await context.set_state(StudentStates.choosing_teacher)
+    await event.bot.send_message(
+        chat_id=chat_id,
+        text=f"Найдено {len(matches)} препод.: выберите:",
+        attachments=[teacher_search_results_kb(matches, 0)],
+    )
+
+
 @router.message_created(StudentStates.entering_text, StudentStates.answering_clarification)
 async def student_text_input(event: MessageCreated, context: BaseContext):
     current_state = await context.get_state()
@@ -193,23 +258,6 @@ async def student_text_input(event: MessageCreated, context: BaseContext):
     if current_state == str(StudentStates.entering_text):
         await context.update_data(ticket_text=text)
         fsm_data = await context.get_data()
-        teacher_id = fsm_data.get("teacher_id")
-
-        async with async_session() as session:
-            kb_result = await session.execute(
-                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id)
-            )
-            kb = kb_result.scalar_one_or_none()
-
-        if kb:
-            ai_answer = await ai_service.check_knowledge_base(kb.content, text)
-            if ai_answer:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"{ai_answer}\n\nЭто отвечает на ваш вопрос?",
-                    attachments=[ai_answer_kb()],
-                )
-                return
 
         async with async_session() as session:
             open_tickets = await ticket_service.get_student_tickets(session, user_id)
@@ -336,7 +384,9 @@ async def _do_create_ticket(event: MessageCallback, user_id: int, context: BaseC
             ticket = existing_ticket
         else:
             ticket = await ticket_service.create_ticket(session, user_id, teacher_id, category, text)
-            await ticket_service.add_log(session, ticket.id, "created", user_id)
+            user = await session.get(User, user_id)
+            student_name = user.name if user else "Студент"
+            await ticket_service.add_log(session, ticket.id, "created", user_id, student_name)
             await session.commit()
 
             summary = await ai_service.generate_summary(text)
@@ -344,8 +394,6 @@ async def _do_create_ticket(event: MessageCallback, user_id: int, context: BaseC
             await session.commit()
 
             teacher_chat = await _get_teacher_chat(session, teacher_id)
-            user = await session.get(User, user_id)
-            student_name = user.name if user else "Студент"
 
         ticket_id = ticket.id
         ticket_number = ticket.number
@@ -407,10 +455,18 @@ async def _show_ticket_detail(event: MessageCallback, user_id: int, ticket_id: i
         "clarification_provided": "Уточнение предоставлено",
         "answered": "Отвечено", "closed": "Закрыто",
     }
-    history_str = "\n".join(
-        f"• {action_labels.get(log.action, log.action)} — {_fmt_dt(log.created_at)}"
-        for log in logs
-    ) or "Нет записей"
+
+    history_lines = []
+    teacher_answer = None
+    for log in logs:
+        label = action_labels.get(log.action, log.action)
+        line = f"• {label} — {_fmt_dt(log.created_at)}"
+        if log.comment and log.action in ("closed", "answered"):
+            teacher_answer = log.comment
+        elif log.comment and log.action == "clarification_requested":
+            line += f"\n  Комментарий: {log.comment}"
+        history_lines.append(line)
+    history_str = "\n".join(history_lines) or "Нет записей"
 
     text = (
         f"{ticket.number} · [{status_label}]\n\n"
@@ -419,6 +475,9 @@ async def _show_ticket_detail(event: MessageCallback, user_id: int, ticket_id: i
         f"Текст: {ticket.text}\n\n"
         f"История:\n{history_str}"
     )
+
+    if teacher_answer:
+        text += f"\n\n💬 Ответ преподавателя:\n{teacher_answer}"
 
     if pending_clar:
         fields = json.loads(pending_clar.requested_fields)

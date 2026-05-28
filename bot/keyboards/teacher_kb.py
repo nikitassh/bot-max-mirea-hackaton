@@ -2,13 +2,38 @@ from maxapi.types import ButtonsPayload, CallbackButton
 from maxapi.types.attachments.attachment import Attachment
 
 
-def main_menu_kb(new_count: int = 0) -> Attachment:
+def main_menu_kb(new_count: int = 0, active_count: int = 0, closed_count: int = 0) -> Attachment:
     return ButtonsPayload(buttons=[
         [CallbackButton(text=f"📋 Очередь ({new_count} новых)", payload="teacher:queue")],
-        [CallbackButton(text="🔄 Активные тикеты", payload="teacher:active")],
-        [CallbackButton(text="✅ Закрытые тикеты", payload="teacher:closed")],
+        [CallbackButton(text=f"🔄 Активные тикеты ({active_count})", payload="teacher:active")],
+        [CallbackButton(text=f"✅ Закрытые тикеты ({closed_count})", payload="teacher:closed")],
         [CallbackButton(text="📚 База знаний", payload="teacher:upload_kb")],
         [CallbackButton(text="📊 Статистика", payload="teacher:stats")],
+    ]).pack()
+
+
+def kb_articles_list_kb(articles: list) -> Attachment:
+    rows = [
+        [CallbackButton(text=f"📄 {(a.filename or 'Без названия')[:40]}", payload=f"teacher:kb_article:{a.id}")]
+        for a in articles
+    ]
+    rows.append([CallbackButton(text="➕ Добавить статью", payload="teacher:kb_add_article")])
+    rows.append([CallbackButton(text="« Назад", payload="teacher:main_menu")])
+    return ButtonsPayload(buttons=rows).pack()
+
+
+def kb_article_detail_kb(article_id: int) -> Attachment:
+    return ButtonsPayload(buttons=[
+        [CallbackButton(text="✏️ Редактировать", payload=f"teacher:kb_edit_article:{article_id}")],
+        [CallbackButton(text="🗑 Удалить", payload=f"teacher:kb_delete_article:{article_id}")],
+        [CallbackButton(text="« Назад", payload="teacher:upload_kb")],
+    ]).pack()
+
+
+def kb_article_delete_confirm_kb(article_id: int) -> Attachment:
+    return ButtonsPayload(buttons=[
+        [CallbackButton(text="Да, удалить", payload=f"teacher:kb_confirm_delete_article:{article_id}")],
+        [CallbackButton(text="Отмена", payload=f"teacher:kb_article:{article_id}")],
     ]).pack()
 
 
@@ -61,6 +86,7 @@ def working_ticket_kb(ticket_id: int) -> Attachment:
 def ai_suggestion_kb(ticket_id: int) -> Attachment:
     return ButtonsPayload(buttons=[
         [CallbackButton(text="📤 Отправить студенту", payload=f"teacher:ai_send:{ticket_id}")],
+        [CallbackButton(text="🔄 Сгенерировать снова", payload=f"teacher:ai_suggest:{ticket_id}")],
         [CallbackButton(text="« Назад к тикету", payload=f"teacher:view:{ticket_id}")],
     ]).pack()
 
@@ -132,4 +158,10 @@ def kb_delete_confirm_kb() -> Attachment:
 def back_to_menu_kb() -> Attachment:
     return ButtonsPayload(buttons=[
         [CallbackButton(text="« В главное меню", payload="teacher:main_menu")],
+    ]).pack()
+
+
+def back_to_kb_kb() -> Attachment:
+    return ButtonsPayload(buttons=[
+        [CallbackButton(text="« Назад к базе знаний", payload="teacher:upload_kb")],
     ]).pack()

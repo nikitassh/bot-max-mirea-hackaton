@@ -19,7 +19,7 @@ from core.models.user import User
 from core.models.clarification import Clarification
 from core.models.knowledge_base import KnowledgeBase
 from core.models.rating import Rating
-from core.services import ticket_service, notification_service, pdf_service, ai_service
+from core.services import ticket_service, notification_service, pdf_service, ai_service, chart_service
 from bot.states.forms import TeacherStates
 from bot.keyboards.teacher_kb import (
     main_menu_kb,
@@ -30,9 +30,13 @@ from bot.keyboards.teacher_kb import (
     ai_suggestion_kb,
     kb_menu_kb,
     kb_delete_confirm_kb,
+    kb_articles_list_kb,
+    kb_article_detail_kb,
+    kb_article_delete_confirm_kb,
     clarification_fields_kb,
     close_outcome_kb,
     back_to_menu_kb,
+    back_to_kb_kb,
     after_schedule_kb,
     CLARIFICATION_FIELDS,
 )
@@ -88,12 +92,16 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
 
     if data == "teacher:main_menu":
         await context.clear()
-        count = 0
+        new_count = active_count = closed_count = 0
         if teacher_id:
             async with async_session() as session:
-                new_tickets = await ticket_service.get_teacher_tickets(session, teacher_id, "new")
-            count = len(new_tickets)
-        await _edit(event, f"Привет, {user.name}!", attachments=[main_menu_kb(count)])
+                new_count = len(await ticket_service.get_teacher_tickets(session, teacher_id, "new"))
+                in_progress = await ticket_service.get_teacher_tickets(session, teacher_id, "in_progress")
+                awaiting = await ticket_service.get_teacher_tickets(session, teacher_id, "awaiting_clarification")
+                scheduled = await ticket_service.get_teacher_tickets(session, teacher_id, "scheduled")
+                active_count = len(in_progress) + len(awaiting) + len(scheduled)
+                closed_count = len(await ticket_service.get_teacher_tickets(session, teacher_id, "closed"))
+        await _edit(event, f"Привет, {user.name}!", attachments=[main_menu_kb(new_count, active_count, closed_count)])
 
     elif data == "teacher:queue":
         if not teacher_id:
@@ -125,15 +133,23 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
             in_progress = await ticket_service.get_teacher_tickets(session, teacher_id, "in_progress")
             awaiting = await ticket_service.get_teacher_tickets(session, teacher_id, "awaiting_clarification")
             scheduled = await ticket_service.get_teacher_tickets(session, teacher_id, "scheduled")
-        tickets = in_progress + awaiting + scheduled
+            tickets = in_progress + awaiting + scheduled
+            student_names = {}
+            for t in tickets:
+                s = await session.get(User, t.student_id)
+                if s:
+                    last_name = s.name.split()[0] if s.name else "Студент"
+                    student_names[t.id] = last_name
+                else:
+                    student_names[t.id] = "Студент"
         if not tickets:
             await _edit(event, "Нет активных тикетов.", attachments=[back_to_menu_kb()])
             return
         items = []
         for ticket in tickets:
-            status_label = STATUS_LABELS.get(ticket.status, ticket.status)
             category_label = CATEGORY_LABELS.get(ticket.category, ticket.category)
-            items.append((ticket.id, f"{ticket.number} · {status_label} · {category_label}"))
+            last_name = student_names.get(ticket.id, "Студент")
+            items.append((ticket.id, f"#{ticket.id} · {category_label} · {last_name}"))
         await _edit(event, f"Активные тикеты ({len(tickets)}):", attachments=[queue_list_kb(items)])
 
     elif data == "teacher:closed":
@@ -157,103 +173,103 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
             return
         async with async_session() as session:
             all_tickets = await ticket_service.get_teacher_tickets(session, teacher_id)
-            open_count = sum(1 for t in all_tickets if t.status != "closed")
-            closed_tickets = [t for t in all_tickets if t.status == "closed"]
-            avg_hours = 0
-            if closed_tickets:
-                total_h = sum(
-                    (t.updated_at - t.created_at).total_seconds() / 3600
-                    for t in closed_tickets if t.updated_at and t.created_at
-                )
-                avg_hours = round(total_h / len(closed_tickets), 1)
-            useful_pct = 0
-            if closed_tickets:
-                ids = [t.id for t in closed_tickets]
+            ratings = []
+            if all_tickets:
+                ids = [t.id for t in all_tickets]
                 r = await session.execute(select(Rating).where(Rating.ticket_id.in_(ids)))
                 ratings = r.scalars().all()
-                useful = sum(1 for x in ratings if x.rating == "useful")
-                useful_pct = round(useful / len(ratings) * 100) if ratings else 0
-        await _edit(event,
-            f"Ваша статистика:\n\n"
-            f"Всего тикетов: {len(all_tickets)}\n"
-            f"Открытых: {open_count}\n"
-            f"Среднее время закрытия: {avg_hours} ч\n"
-            f"Полезных ответов: {useful_pct}%",
-            attachments=[back_to_menu_kb()],
-        )
+
+        mid = event.message.body.mid
+        await _edit(event, "⏳ Строю график...")
+        try:
+            from maxapi.types.input_media import InputMediaBuffer
+            from maxapi.enums.upload_type import UploadType
+            png_bytes = chart_service.build_stats_chart(
+                tickets=all_tickets,
+                ratings=ratings,
+                category_labels=CATEGORY_LABELS,
+                status_labels=STATUS_LABELS,
+            )
+            media = InputMediaBuffer(buffer=png_bytes, filename="stats.png", type=UploadType.IMAGE)
+            uploaded = await bot.upload_media(media)
+            await bot.send_message(chat_id=chat_id, text="Статистика:", attachments=[uploaded])
+        except Exception as e:
+            await bot.send_message(chat_id=chat_id, text=f"Не удалось построить график: {e}")
+        finally:
+            try:
+                await bot.delete_message(message_id=mid)
+            except Exception:
+                pass
+            new_count = active_count = closed_count = 0
+            if teacher_id:
+                async with async_session() as session:
+                    new_count = len(await ticket_service.get_teacher_tickets(session, teacher_id, "new"))
+                    active_count = len(await ticket_service.get_teacher_tickets(session, teacher_id, "in_progress")) + \
+                                   len(await ticket_service.get_teacher_tickets(session, teacher_id, "awaiting_clarification")) + \
+                                   len(await ticket_service.get_teacher_tickets(session, teacher_id, "scheduled"))
+                    closed_count = len(await ticket_service.get_teacher_tickets(session, teacher_id, "closed"))
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Привет, {user.name}!",
+                attachments=[main_menu_kb(new_count, active_count, closed_count)],
+            )
 
     elif data == "teacher:upload_kb":
         if not teacher_id:
             await _edit(event, "Вы не найдены в справочнике.", attachments=[back_to_menu_kb()])
             return
         async with async_session() as session:
-            kb_result = await session.execute(
-                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id)
+            result = await session.execute(
+                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id).order_by(KnowledgeBase.created_at)
             )
-            kb = kb_result.scalar_one_or_none()
-        if kb:
-            updated = kb.updated_at.replace(tzinfo=__import__('datetime').timezone.utc).astimezone(
-                __import__('datetime').timezone(__import__('datetime').timedelta(hours=3))
-            ).strftime('%d.%m.%Y %H:%M')
-            await _edit(event,
-                f"📚 База знаний\n\nИсточник: {kb.filename}\nОбъём: {len(kb.content)} симв.\nОбновлено: {updated}",
-                attachments=[kb_menu_kb(True)],
-            )
+            articles = result.scalars().all()
+        if articles:
+            await _edit(event, f"📚 База знаний — {len(articles)} ст.:", attachments=[kb_articles_list_kb(articles)])
         else:
-            await _edit(event, "📚 База знаний\n\nБаза знаний ещё не загружена.", attachments=[kb_menu_kb(False)])
+            await _edit(event, "📚 База знаний\n\nСтатей пока нет.", attachments=[kb_articles_list_kb([])])
 
-    elif data == "teacher:kb_view":
-        if not teacher_id:
-            await _edit(event, "Вы не найдены в справочнике.", attachments=[back_to_menu_kb()])
-            return
+    elif data == "teacher:kb_add_article":
+        await context.set_state(TeacherStates.entering_kb_title)
+        await _edit(event, "Введите название статьи:")
+
+    elif data.startswith("teacher:kb_article:"):
+        article_id = int(data.split(":")[-1])
         async with async_session() as session:
-            kb_result = await session.execute(
-                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id)
-            )
-            kb = kb_result.scalar_one_or_none()
-        if not kb:
-            await _edit(event, "База знаний не загружена.", attachments=[kb_menu_kb(False)])
+            article = await session.get(KnowledgeBase, article_id)
+        if not article:
+            await _edit(event, "Статья не найдена.", attachments=[back_to_menu_kb()])
             return
-        preview = kb.content[:3000]
-        truncated = "…\n\n[показаны первые 3000 символов]" if len(kb.content) > 3000 else ""
-        from maxapi.types import ButtonsPayload, CallbackButton
-        back_kb = ButtonsPayload(buttons=[
-            [CallbackButton(text="« Назад", payload="teacher:upload_kb")]
-        ]).pack()
-        await _edit(event, f"{preview}{truncated}", attachments=[back_kb])
-
-    elif data == "teacher:kb_edit":
-        await context.set_state(TeacherStates.uploading_kb)
-        await context.update_data(kb_mode="replace")
+        title = article.filename or "Без названия"
+        preview = article.content[:1000]
+        truncated = "\n…" if len(article.content) > 1000 else ""
         await _edit(event,
-            "✏️ Отправьте новое содержимое базы знаний — PDF или текст.\nТекущие данные будут заменены.",
-            attachments=[kb_menu_kb(False)],
+            f"📄 {title}\n\n{preview}{truncated}",
+            attachments=[kb_article_detail_kb(article_id)],
         )
 
-    elif data == "teacher:kb_add":
+    elif data.startswith("teacher:kb_edit_article:"):
+        article_id = int(data.split(":")[-1])
         await context.set_state(TeacherStates.uploading_kb)
-        await context.update_data(kb_mode="append")
-        await _edit(event,
-            "➕ Отправьте данные для добавления в базу знаний — PDF или текст.\nОни будут добавлены к существующим.",
-            attachments=[kb_menu_kb(False)],
-        )
+        await context.update_data(kb_edit_article_id=article_id)
+        await _edit(event, "Введите новое содержание статьи:", attachments=[back_to_kb_kb()])
 
-    elif data == "teacher:kb_delete":
-        await _edit(event, "Удалить всю базу знаний?", attachments=[kb_delete_confirm_kb()])
+    elif data.startswith("teacher:kb_delete_article:"):
+        article_id = int(data.split(":")[-1])
+        await _edit(event, "Удалить эту статью?", attachments=[kb_article_delete_confirm_kb(article_id)])
 
-    elif data == "teacher:kb_confirm_delete":
-        if not teacher_id:
-            await _edit(event, "Вы не найдены в справочнике.", attachments=[back_to_menu_kb()])
-            return
+    elif data.startswith("teacher:kb_confirm_delete_article:"):
+        article_id = int(data.split(":")[-1])
         async with async_session() as session:
-            kb_result = await session.execute(
-                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id)
-            )
-            kb = kb_result.scalar_one_or_none()
-            if kb:
-                await session.delete(kb)
+            article = await session.get(KnowledgeBase, article_id)
+            if article:
+                await session.delete(article)
                 await session.commit()
-        await _edit(event, "🗑 База знаний удалена.", attachments=[kb_menu_kb(False)])
+        async with async_session() as session:
+            result = await session.execute(
+                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id).order_by(KnowledgeBase.created_at)
+            )
+            articles = result.scalars().all()
+        await _edit(event, f"🗑 Статья удалена.\n\n📚 База знаний — {len(articles)} ст.:", attachments=[kb_articles_list_kb(articles)])
 
     elif data.startswith("teacher:accept:"):
         ticket_id = int(data.split(":")[-1])
@@ -269,8 +285,6 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
             ticket_number = ticket.number
             await session.commit()
         await _show_ticket_detail_teacher(event, ticket_id)
-        if student_chat:
-            await notification_service.notify_student_accepted(bot, student_chat, ticket_number)
 
     elif data.startswith("teacher:view:"):
         ticket_id = int(data.split(":")[-1])
@@ -344,20 +358,24 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
             kb_result = await session.execute(
                 select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id)
             )
-            kb = kb_result.scalar_one_or_none()
+            articles = kb_result.scalars().all()
 
-        if not kb:
+        if not articles:
             await _edit(event,
-                "База знаний не загружена. Добавьте её через «📚 База знаний» в главном меню.",
+                "База знаний не загружена. Добавьте статьи через «📚 База знаний» в главном меню.",
                 attachments=[working_ticket_kb(ticket_id)],
             )
             return
+
+        kb_text = "\n\n".join(
+            f"=== {a.filename or 'Статья'} ===\n{a.content}" for a in articles
+        )
 
         await _edit(event, "⏳ Генерирую ответ...")
         try:
             import asyncio
             suggestion = await asyncio.wait_for(
-                ai_service.suggest_teacher_answer(kb.content, ticket.text if ticket else ""),
+                ai_service.suggest_teacher_answer(kb_text, ticket.text if ticket else ""),
                 timeout=25.0,
             )
         except asyncio.TimeoutError:
@@ -448,6 +466,21 @@ async def teacher_callbacks(event: MessageCallback, context: BaseContext):
         await _edit(event, "✅ Тикет закрыт после консультации.", attachments=[back_to_menu_kb()])
 
 
+@router.message_created(TeacherStates.entering_kb_title)
+async def teacher_kb_title_input(event: MessageCreated, context: BaseContext):
+    title = (event.message.body.text or "").strip()
+    if not title:
+        await event.bot.send_message(chat_id=event.chat.chat_id, text="Введите название статьи:")
+        return
+    await context.update_data(kb_new_title=title)
+    await context.set_state(TeacherStates.uploading_kb)
+    await event.bot.send_message(
+        chat_id=event.chat.chat_id,
+        text=f"Статья «{title}»\n\nТеперь введите описание (текст статьи):",
+        attachments=[back_to_kb_kb()],
+    )
+
+
 @router.message_created(
     TeacherStates.uploading_kb,
     TeacherStates.entering_answer,
@@ -475,71 +508,40 @@ async def teacher_text_input(event: MessageCreated, context: BaseContext):
             await context.clear()
             return
 
-        attachments = getattr(event.message, "attachments", None) or []
-        pdf_attachment = None
-        for att in attachments:
-            att_type = getattr(att, "type", None)
-            if att_type and str(att_type).lower() in ("file", "attachment"):
-                pdf_attachment = att
-                break
-
-        if pdf_attachment:
-            try:
-                payload = getattr(pdf_attachment, "payload", None)
-                file_url = getattr(payload, "url", None) if payload else None
-                filename = getattr(payload, "filename", "document.pdf") if payload else "document.pdf"
-                if file_url:
-                    import aiohttp
-                    async with aiohttp.ClientSession() as http:
-                        async with http.get(file_url) as resp:
-                            file_bytes = await resp.read()
-                    extracted_text = pdf_service.extract_text(file_bytes)
-                else:
-                    extracted_text = ""
-            except Exception:
-                extracted_text = ""
-                filename = "document.pdf"
-
-            if not extracted_text:
-                await bot.send_message(chat_id=chat_id, text="Не удалось извлечь текст из файла.")
-                await context.clear()
-                return
-        elif text.strip():
-            extracted_text = text.strip()
-            filename = "текст"
-        else:
-            await bot.send_message(
-                chat_id=chat_id,
-                text="Отправьте PDF-файл или напишите текст с требованиями курса.",
-            )
+        if not text.strip():
+            await bot.send_message(chat_id=chat_id, text="Введите текст статьи:")
             return
 
+        content = text.strip()
         fsm_data = await context.get_data()
-        kb_mode = fsm_data.get("kb_mode", "replace")
+        edit_article_id = fsm_data.get("kb_edit_article_id")
+        new_title = fsm_data.get("kb_new_title", "Без названия")
 
         async with async_session() as session:
-            existing = await session.execute(
-                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id)
-            )
-            kb = existing.scalar_one_or_none()
-            if kb:
-                if kb_mode == "append":
-                    kb.content = kb.content + "\n\n" + extracted_text
-                    kb.filename = f"{kb.filename} + {filename}" if kb.filename != filename else filename
-                else:
-                    kb.content = extracted_text
-                    kb.filename = filename
-                kb.updated_at = datetime.utcnow()
+            if edit_article_id:
+                article = await session.get(KnowledgeBase, edit_article_id)
+                if article:
+                    article.content = content
+                    article.updated_at = datetime.utcnow()
+                action = "обновлена"
+                title = article.filename if article else new_title
             else:
-                session.add(KnowledgeBase(teacher_id=teacher_id, filename=filename, content=extracted_text))
+                session.add(KnowledgeBase(teacher_id=teacher_id, filename=new_title, content=content))
+                action = "добавлена"
+                title = new_title
             await session.commit()
 
+        async with async_session() as session:
+            result = await session.execute(
+                select(KnowledgeBase).where(KnowledgeBase.teacher_id == teacher_id).order_by(KnowledgeBase.created_at)
+            )
+            articles = result.scalars().all()
+
         await context.clear()
-        action = "Данные добавлены" if kb_mode == "append" else "База знаний загружена"
         await bot.send_message(
             chat_id=chat_id,
-            text=f"✅ {action} ({len(extracted_text)} симв.).",
-            attachments=[kb_menu_kb(True)],
+            text=f"✅ Статья «{title}» {action}.\n\n📚 База знаний — {len(articles)} ст.:",
+            attachments=[kb_articles_list_kb(articles)],
         )
 
     elif current_state == str(TeacherStates.entering_answer):
@@ -616,8 +618,10 @@ async def _show_ticket_detail_teacher(event: MessageCallback, ticket_id: int):
 
     status_label = STATUS_LABELS.get(ticket.status, ticket.status)
     category_label = CATEGORY_LABELS.get(ticket.category, ticket.category)
-    student_name = student.name if student else "Студент"
-    student_group = getattr(student, "group", None) or "ИКБО-65-23"
+    # Имя берём из лога создания, чтобы не зависеть от текущей роли пользователя
+    created_log = next((l for l in logs if l.action == "created"), None)
+    student_name = (created_log.comment if created_log and created_log.comment else None) \
+                   or (student.name if student else "Студент")
 
     action_labels = {
         "created": "Создано", "accepted": "Принято в работу",
