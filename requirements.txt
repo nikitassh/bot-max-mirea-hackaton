@@ -1,0 +1,11 @@
+maxapi
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]
+asyncpg
+alembic
+pydantic-settings
+openai
+pymupdf
+loguru
+python-dotenv
